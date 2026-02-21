@@ -1,0 +1,171 @@
+---
+- name: Configure Todo App Server
+  hosts: all
+  become: true
+  vars:
+    docker_image: "seu-usuario/todo-api"
+    image_tag: "latest"
+    mongo_uri: "mongodb://mongo:27017/tododb"
+    app_port: 3000
+    app_dir: /opt/todo-app
+
+  tasks:
+    # ─── Sistema ────────────────────────────────────────────────────────────────
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install system dependencies
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - python3-pip
+        state: present
+
+    # ─── Docker ─────────────────────────────────────────────────────────────────
+    # CORREÇÃO: docker.io é uma versão antiga do repositório Ubuntu.
+    # O correto é instalar pelo repositório oficial do Docker para ter
+    # a versão mais recente com suporte ao plugin "docker compose" (v2).
+
+    - name: Add Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker repository
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+
+    - name: Install Docker CE and Compose plugin
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-compose-plugin
+        state: present
+        update_cache: yes
+
+    - name: Start and enable Docker service
+      # CORREÇÃO: o start deve vir logo após instalar, não no final do playbook.
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    # ─── Python SDK (necessário para o módulo community.docker) ─────────────────
+    # CORREÇÃO: sem o SDK Python do Docker instalado no servidor,
+    # o módulo community.docker.docker_compose_v2 falha silenciosamente.
+
+    - name: Install Docker Python SDK
+      pip:
+        name:
+          - docker
+        state: present
+
+    # ─── Arquivos da aplicação ───────────────────────────────────────────────────
+
+    - name: Create app directory
+      file:
+        path: "{{ app_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Create docker-compose.yml
+      copy:
+        dest: "{{ app_dir }}/docker-compose.yml"
+        # CORREÇÃO: adicionado healthcheck no mongo para a API só subir
+        # quando o banco estiver pronto (evita erro de conexão no boot).
+        # Removida a porta exposta do mongo (não precisa ficar pública).
+        # Removida a porta exposta da api (só o nginx precisa acessar).
+        content: |
+          version: '3.8'
+          services:
+            mongo:
+              image: mongo:6
+              container_name: todo-mongo
+              volumes:
+                - mongo_data:/data/db
+              healthcheck:
+                test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+                interval: 10s
+                timeout: 5s
+                retries: 5
+              restart: always
+
+            api:
+              image: {{ docker_image }}:{{ image_tag }}
+              container_name: todo-api
+              environment:
+                - MONGO_URI={{ mongo_uri }}
+                - PORT=3000
+                - NODE_ENV=production
+              depends_on:
+                mongo:
+                  condition: service_healthy
+              restart: always
+
+            nginx:
+              image: nginx:alpine
+              container_name: todo-nginx
+              ports:
+                - "80:80"
+              volumes:
+                - {{ app_dir }}/nginx.conf:/etc/nginx/nginx.conf:ro
+              depends_on:
+                - api
+              restart: always
+
+          volumes:
+            mongo_data:
+
+    - name: Create nginx.conf
+      copy:
+        dest: "{{ app_dir }}/nginx.conf"
+        # CORREÇÃO: mover nginx_conf dos vars para cá evita problema de
+        # escaping com $ (variáveis do nginx conflitam com Jinja2/Ansible).
+        content: |
+          events {
+            worker_connections 1024;
+          }
+          http {
+            upstream todo_api {
+              server api:3000;
+            }
+            server {
+              listen 80;
+              server_name _;
+              location / {
+                proxy_pass         http://todo_api;
+                proxy_http_version 1.1;
+                proxy_set_header   Upgrade    $http_upgrade;
+                proxy_set_header   Connection 'upgrade';
+                proxy_set_header   Host       $host;
+                proxy_set_header   X-Real-IP  $remote_addr;
+                proxy_cache_bypass $http_upgrade;
+              }
+            }
+          }
+
+    # ─── Deploy ─────────────────────────────────────────────────────────────────
+
+    - name: Pull latest images
+      command: docker compose pull
+      args:
+        chdir: "{{ app_dir }}"
+
+    - name: Start containers with Docker Compose
+      # CORREÇÃO: community.docker.docker_compose (sem _v2) usa a v1 do
+      # docker-compose que está sendo descontinuada. O correto hoje é
+      # usar docker_compose_v2 que chama o plugin nativo (docker compose).
+      community.docker.docker_compose_v2:
+        project_src: "{{ app_dir }}"
+        state: present
+        recreate: always

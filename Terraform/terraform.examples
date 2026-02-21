@@ -1,0 +1,12 @@
+# Copie este arquivo para terraform.tfvars e preencha com seus valores
+# cp terraform.tfvars.example terraform.tfvars
+# NUNCA commite o terraform.tfvars no Git!
+
+aws_access_key       = "AKIAIOSFODNN7EXAMPLE"
+aws_secret_key       = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+region               = "us-east-1"         # Região AWS (ex: sa-east-1 para São Paulo)
+instance_type        = "t3.micro"           # t3.micro = free tier | t3.small para mais memória
+ssh_public_key_path  = "~/.ssh/id_rsa.pub"
+ssh_private_key_path = "~/.ssh/id_rsa"
+docker_image         = "seu-usuario/todo-api"
+image_tag            = "latest"
